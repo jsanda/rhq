@@ -253,9 +253,14 @@ public class MaintenanceStep implements Serializable {
     }
 
     public enum Type {
-        ResourceUpdate,
-        EntityUpdate,
-        ResourceOperation,
-        ServerUpdate
+        // I think we only need two types - resource operation and server operation. See
+        // the @ServerOperation annotation in the storage-maintenance module for more
+        // details on server operations.
+        RESOURCE_OP, SERVER_OP
+
+//        ResourceUpdate,
+//        EntityUpdate,
+//        ResourceOperation,
+//        ServerUpdate
     }
 }
