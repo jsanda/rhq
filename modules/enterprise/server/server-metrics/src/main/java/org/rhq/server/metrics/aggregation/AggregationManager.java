@@ -53,6 +53,8 @@ public class AggregationManager {
 
     private Semaphore permits;
 
+    private boolean cacheEnabled;
+
     private long cacheActivationTime;
 
     private int indexPageSize;
@@ -76,6 +78,10 @@ public class AggregationManager {
 
     private boolean is24HourTimeSliceFinished() {
         return dtService.is24HourTimeSliceFinished(startTime);
+    }
+
+    public void setCacheEnabled(boolean cacheEnabled) {
+        this.cacheEnabled = cacheEnabled;
     }
 
     /**
@@ -206,7 +212,7 @@ public class AggregationManager {
     }
 
     private boolean isCacheActive() {
-        return startTime.getMillis() >= cacheActivationTime;
+        return cacheEnabled && startTime.getMillis() >= cacheActivationTime;
     }
 
 }

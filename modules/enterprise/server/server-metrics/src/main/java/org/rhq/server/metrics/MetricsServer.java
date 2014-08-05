@@ -93,6 +93,13 @@ public class MetricsServer {
 
     private long cacheActivationTime;
 
+    /**
+     * Usage of the metrics_cache table is disabled by default. Enabling it also requires
+     * updating the METRICS_CACHE_ACTIVATION_TIME system setting. It should be a timestamp
+     * that is set to no earlier than the start of the next day.
+     */
+    private boolean cacheEnabled = Boolean.parseBoolean(System.getProperty("rhq.metric.cache.enabled", "false"));
+
     private Days rawDataAgeLimit = Days.days(Integer.parseInt(System.getProperty("rhq.metrics.data.age-limit", "3")));
 
     public void setDAO(MetricsDAO dao) {
@@ -156,7 +163,7 @@ public class MetricsServer {
         }
         aggregationWorkers = MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(numAggregationWorkers,
             new StorageClientThreadFactory()));
-        determineMostRecentRawDataSinceLastShutdown();
+//        determineMostRecentRawDataSinceLastShutdown();
 
         invalidMetricsManager = new InvalidMetricsManager(dateTimeService, dao);
     }
@@ -480,21 +487,32 @@ public class MetricsServer {
                 continue;
             }
 
+            ListenableFuture<List<ResultSet>> insertsFuture;
+
             int startScheduleId = calculateStartScheduleId(data.getScheduleId());
             DateTime day = dateTimeService.get24HourTimeSlice(collectionTimeSlice);
 
-            StorageResultSetFuture rawFuture = dao.insertRawData(data);
+            if (cacheEnabled) {
+                StorageResultSetFuture rawFuture = dao.insertRawData(data);
 
-            StorageResultSetFuture cacheFuture = dao.updateMetricsCache(MetricsTable.RAW,
-                collectionTimeSlice.getMillis(), startScheduleId, data.getScheduleId(), data.getTimestamp(),
-                ImmutableMap.of(AggregateType.VALUE.ordinal(), data.getValue()));
+                StorageResultSetFuture cacheFuture = dao.updateMetricsCache(MetricsTable.RAW,
+                    collectionTimeSlice.getMillis(), startScheduleId, data.getScheduleId(), data.getTimestamp(),
+                    ImmutableMap.of(AggregateType.VALUE.ordinal(), data.getValue()));
 
-            StorageResultSetFuture indexFuture = dao.updateCacheIndex(MetricsTable.RAW, day.getMillis(), partition,
-                collectionTimeSlice.getMillis(), startScheduleId, insertTimeSlice.getMillis(),
-                ImmutableSet.of(data.getScheduleId()));
+                StorageResultSetFuture indexFuture = dao.updateCacheIndex(MetricsTable.RAW, day.getMillis(), partition,
+                    collectionTimeSlice.getMillis(), startScheduleId, insertTimeSlice.getMillis(),
+                    ImmutableSet.of(data.getScheduleId()));
 
-            ListenableFuture<List<ResultSet>> insertsFuture = Futures.successfulAsList(rawFuture, cacheFuture,
-                indexFuture);
+                insertsFuture = Futures.successfulAsList(rawFuture, cacheFuture, indexFuture);
+            } else {
+                StorageResultSetFuture rawFuture = dao.insertRawData(data);
+
+                StorageResultSetFuture indexFuture = dao.updateCacheIndex(MetricsTable.RAW, day.getMillis(), partition,
+                    collectionTimeSlice.getMillis(), startScheduleId, insertTimeSlice.getMillis(),
+                    ImmutableSet.of(data.getScheduleId()));
+
+                insertsFuture = Futures.successfulAsList(rawFuture, indexFuture);
+            }
 
             Futures.addCallback(insertsFuture, new FutureCallback<List<ResultSet>>() {
                 @Override
@@ -550,6 +568,7 @@ public class MetricsServer {
 
             AggregationManager aggregator = new AggregationManager(aggregationWorkers, dao, dateTimeService, timeSlice,
                 aggregationBatchSize, parallelism, cacheBatchSize, configuration.getIndexPageSize());
+            aggregator.setCacheEnabled(cacheEnabled);
             aggregator.setCacheActivationTime(cacheActivationTime);
 
             return aggregator.run();
