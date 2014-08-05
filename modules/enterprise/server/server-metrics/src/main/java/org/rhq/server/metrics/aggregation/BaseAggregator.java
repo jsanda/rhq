@@ -12,6 +12,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Stopwatch;
 import com.google.common.util.concurrent.AsyncFunction;
 import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 
@@ -373,6 +374,22 @@ abstract class BaseAggregator {
                 };
             }
         };
+    }
+
+    protected <I, O> ListenableFuture<O> transform(ListenableFuture<I> input,
+        final Function<? super I, ? extends O> function) {
+        AsyncFunction<I, O> wrapperFunction = new AsyncFunction<I, O>() {
+            @Override
+            public ListenableFuture<O> apply(I input) throws Exception {
+                try {
+                    O output = function.apply(input);
+                    return Futures.immediateFuture(output);
+                } catch (Exception e) {
+                    return Futures.immediateFailedFuture(e);
+                }
+            }
+        };
+        return Futures.transform(input, wrapperFunction, aggregationTasks);
     }
 
 

@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.datastax.driver.core.ResultSet;
 import com.google.common.base.Function;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.PeekingIterator;
@@ -238,14 +239,33 @@ class PastDataAggregator extends BaseAggregator {
 
         ListenableFuture<List<ResultSet>> queriesFuture = Futures.allAsList(queryFutures);
 
-        ListenableFuture<Iterable<List<RawNumericMetric>>> iterableFuture = Futures.transform(queriesFuture,
-            toIterable(new RawNumericMetricMapper()), aggregationTasks);
+        ListenableFuture<Iterable<List<RawNumericMetric>>> iterableFuture = transform(queriesFuture,
+            toIterable(new RawNumericMetricMapper()));
 
-        ListenableFuture<List<AggregateNumericMetric>> metricsFuture = Futures.transform(iterableFuture,
-            computeAggregates(indexEntry.getCollectionTimeSlice(), RawNumericMetric.class), aggregationTasks);
+//        ListenableFuture<Iterable<List<RawNumericMetric>>> iterableFuture = Futures.transform(queriesFuture,
+//            toIterable(new RawNumericMetricMapper()), aggregationTasks);
 
-        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(metricsFuture,
-            indexAggregatesPair(indexEntry));
+        ListenableFuture<List<AggregateNumericMetric>> metricsFuture = transform(iterableFuture,
+            computeAggregates(indexEntry.getCollectionTimeSlice(), RawNumericMetric.class));
+
+        metricsFuture = Futures.transform(metricsFuture, new AsyncFunction<List<AggregateNumericMetric>, List<AggregateNumericMetric>>() {
+            @Override
+            public ListenableFuture<List<AggregateNumericMetric>> apply(List<AggregateNumericMetric> metrics)
+                throws Exception {
+                Preconditions.checkArgument(!metrics.isEmpty(), "The 1 hour aggregate metrics computed by the " +
+                    "computeAggregates() function should be non-empty.");
+
+                return Futures.immediateFuture(metrics);
+            }
+        });
+
+//        ListenableFuture<List<AggregateNumericMetric>> metricsFuture = Futures.transform(iterableFuture,
+//            computeAggregates(indexEntry.getCollectionTimeSlice(), RawNumericMetric.class), aggregationTasks);
+
+        ListenableFuture<IndexAggregatesPair> pairFuture = transform(metricsFuture, indexAggregatesPair(indexEntry));
+
+//        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(metricsFuture,
+//            indexAggregatesPair(indexEntry));
 
         boolean is6HourTimeSliceFinished = dateTimeService.is6HourTimeSliceFinished(
             indexEntry.getCollectionTimeSlice());
@@ -429,14 +449,21 @@ class PastDataAggregator extends BaseAggregator {
         ListenableFuture<List<CombinedMetricsPair>> pairFutures = Futures.transform(metricsFuture,
             fetch1HourData(sixHourTimeSlice), aggregationTasks);
 
-        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = Futures.transform(pairFutures,
-            toIterable(), aggregationTasks);
+        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = transform(pairFutures, toIterable());
+//        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = Futures.transform(pairFutures,
+//            toIterable(), aggregationTasks);
 
-        ListenableFuture<List<AggregateNumericMetric>> sixHourMetricsFuture = Futures.transform(iterableFuture,
-            computeAggregates(sixHourTimeSlice.getMillis(), AggregateNumericMetric.class), aggregationTasks);
+        ListenableFuture<List<AggregateNumericMetric>> sixHourMetricsFuture = transform(iterableFuture,
+            computeAggregates(sixHourTimeSlice.getMillis(), AggregateNumericMetric.class));
 
-        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(sixHourMetricsFuture,
+//        ListenableFuture<List<AggregateNumericMetric>> sixHourMetricsFuture = Futures.transform(iterableFuture,
+//            computeAggregates(sixHourTimeSlice.getMillis(), AggregateNumericMetric.class), aggregationTasks);
+
+        ListenableFuture<IndexAggregatesPair> pairFuture = transform(sixHourMetricsFuture,
             indexAggregatesPair(indexEntry));
+
+//        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(sixHourMetricsFuture,
+//            indexAggregatesPair(indexEntry));
 
         ListenableFuture<List<ResultSet>> insertsFuture;
         if (is24HourTimeSliceFinished) {
@@ -461,14 +488,23 @@ class PastDataAggregator extends BaseAggregator {
         ListenableFuture<List<CombinedMetricsPair>> pairFutures = Futures.transform(sixHourMetricsFuture,
             fetch6HourData(timeSlice));
 
-        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = Futures.transform(pairFutures,
-            toIterable(), aggregationTasks);
+        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = transform(pairFutures,
+            toIterable());
 
-        ListenableFuture<List<AggregateNumericMetric>> twentyFourHourMetricsFuture = Futures.transform(iterableFuture,
-            computeAggregates(timeSlice.getMillis(), AggregateNumericMetric.class), aggregationTasks);
+//        ListenableFuture<Iterable<List<AggregateNumericMetric>>> iterableFuture = Futures.transform(pairFutures,
+//            toIterable(), aggregationTasks);
 
-        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(twentyFourHourMetricsFuture,
+        ListenableFuture<List<AggregateNumericMetric>> twentyFourHourMetricsFuture = transform(iterableFuture,
+            computeAggregates(timeSlice.getMillis(), AggregateNumericMetric.class));
+
+//        ListenableFuture<List<AggregateNumericMetric>> twentyFourHourMetricsFuture = Futures.transform(iterableFuture,
+//            computeAggregates(timeSlice.getMillis(), AggregateNumericMetric.class), aggregationTasks);
+
+        ListenableFuture<IndexAggregatesPair> pairFuture = transform(twentyFourHourMetricsFuture,
             indexAggregatesPair(indexEntry));
+
+//        ListenableFuture<IndexAggregatesPair> pairFuture = Futures.transform(twentyFourHourMetricsFuture,
+//            indexAggregatesPair(indexEntry));
 
         ListenableFuture<List<ResultSet>> insertsFuture = Futures.transform(pairFuture,
             persistFns.persist24HourMetrics(), aggregationTasks);
@@ -497,12 +533,19 @@ class PastDataAggregator extends BaseAggregator {
     private ListenableFuture<List<AggregateNumericMetric>> proceedWithMetricsAfterInserts(MetricsFuturesPair pair) {
 
         final ListenableFuture<List<List<?>>> futures = Futures.allAsList(pair.resultSetsFuture, pair.metricsFuture);
-        return Futures.transform(futures, new Function<List<List<?>>, List<AggregateNumericMetric>>() {
+        return transform(futures, new Function<List<List<?>>, List<AggregateNumericMetric>>() {
             @Override
             public List<AggregateNumericMetric> apply(List<List<?>> input) {
                 return (List<AggregateNumericMetric>) input.get(1);
             }
         });
+
+//        return Futures.transform(futures, new Function<List<List<?>>, List<AggregateNumericMetric>>() {
+//            @Override
+//            public List<AggregateNumericMetric> apply(List<List<?>> input) {
+//                return (List<AggregateNumericMetric>) input.get(1);
+//            }
+//        });
     }
 
     private AsyncFunction<List<AggregateNumericMetric>, List<CombinedMetricsPair>> fetch1HourData(
@@ -514,6 +557,9 @@ class PastDataAggregator extends BaseAggregator {
 
             @Override
             public ListenableFuture<List<CombinedMetricsPair>> apply(List<AggregateNumericMetric> metrics) {
+                Preconditions.checkArgument(!metrics.isEmpty(), "The function returned from fetch1HourData() " +
+                        "expects as input a non-empty list of recently computed 1 hour aggregate metrics");
+
                 List<ListenableFuture<CombinedMetricsPair>> pairFutures =
                     new ArrayList<ListenableFuture<CombinedMetricsPair>>();
 
@@ -539,6 +585,9 @@ class PastDataAggregator extends BaseAggregator {
             @Override
             public ListenableFuture<List<CombinedMetricsPair>> apply(List<AggregateNumericMetric> metrics)
                 throws Exception {
+                Preconditions.checkArgument(!metrics.isEmpty(), "The function returned from fetch6HourData() " +
+                    "expects as input a non-empty list of recently computed 6 hour aggregate metrics");
+
                 List<ListenableFuture<CombinedMetricsPair>> pairFutures =
                     new ArrayList<ListenableFuture<CombinedMetricsPair>>();
 
