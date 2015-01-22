@@ -332,7 +332,7 @@ public class MigrateAggregateMetrics implements Step {
             for (Integer scheduleId : readResults.failedReads) {
                 remainingScheduleIds.offer(scheduleId);
             }
-            Map<Integer, ResultSet> failedWrites = writeData(readResults.resultSets, bucket, ttl, remainingMetrics);
+            Map<Integer, List<Row>> failedWrites = writeData(readResults.resultSets, bucket, ttl, remainingMetrics);
             while (!failedWrites.isEmpty()) {
                 failedWrites = writeData(failedWrites, bucket, ttl, remainingMetrics);
             }
@@ -356,7 +356,7 @@ public class MigrateAggregateMetrics implements Step {
     private static class ReadResults {
         Set<Integer> failedReads = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
 
-        Map<Integer, ResultSet> resultSets = new ConcurrentHashMap<Integer, ResultSet>();
+        Map<Integer, List<Row>> resultSets = new ConcurrentHashMap<Integer, List<Row>>();
     }
 
     private ReadResults readData(List<Integer> scheduleIds, PreparedStatement query, final Bucket bucket)
@@ -372,7 +372,7 @@ public class MigrateAggregateMetrics implements Step {
                 @Override
                 public void onSuccess(ResultSet resultSet) {
                     try {
-                        results.resultSets.put(scheduleId, resultSet);
+                        results.resultSets.put(scheduleId, resultSet.all());
                         rateMonitor.requestSucceeded();
                     } finally {
                         queries.countDown();
@@ -401,61 +401,69 @@ public class MigrateAggregateMetrics implements Step {
         return results;
     }
 
-    private Map<Integer, ResultSet> writeData(Map<Integer, ResultSet> resultSets, final Bucket bucket, final Days ttl,
-        final AtomicInteger remainingMetrics) throws InterruptedException{
+    private Map<Integer, List<Row>> writeData(Map<Integer, List<Row>> resultSets, final Bucket bucket,
+        final Days ttl, final AtomicInteger remainingMetrics) throws InterruptedException{
 
         final CountDownLatch writes = new CountDownLatch(resultSets.size());
-        final Map<Integer, ResultSet> failedWrites = new ConcurrentHashMap<Integer, ResultSet>();
+        final Map<Integer, List<Row>> failedWrites = new ConcurrentHashMap<Integer, List<Row>>();
 
-        for (final Map.Entry<Integer, ResultSet> entry : resultSets.entrySet()) {
-            threadPool.submit(new Runnable() {
-                @Override
-                public void run() {
-                    ListenableFuture<List<ResultSet>> insertsFuture = writeData(entry.getKey(), bucket,
-                        entry.getValue(), ttl.toStandardSeconds());
-                    Futures.addCallback(insertsFuture, new FutureCallback<List<ResultSet>>() {
-                        @Override
-                        public void onSuccess(List<ResultSet> results) {
-                            try {
-                                if (log.isDebugEnabled()) {
-                                    log.debug("Finished " + bucket + " data migration for schedule id " +
-                                        entry.getKey());
-                                }
-                                rateMonitor.requestSucceeded();
-                                remainingMetrics.decrementAndGet();
-                            } finally {
-                                writes.countDown();
-                            }
-                        }
-
-                        @Override
-                        public void onFailure(Throwable t) {
-                            try {
-                                if (log.isDebugEnabled()) {
-                                    log.debug("Failed to write " + bucket + " data for schedule id " + entry.getKey(),
-                                        t);
-                                } else {
-                                    log.info("Failed to write " + bucket + " data for schedule id " + entry.getKey() +
-                                        ": " + ThrowableUtil.getRootMessage(t));
-                                }
-                                rateMonitor.requestFailed();
-                                failedWrites.put(entry.getKey(), entry.getValue());
-                            } finally {
-                                writes.countDown();
-                            }
-                        }
-                    });
+        for (final Map.Entry<Integer, List<Row>> entry : resultSets.entrySet()) {
+            if (entry.getValue().isEmpty()) {
+                if (log.isDebugEnabled()) {
+                    log.debug("There is no " + bucket + " data for schedule id " + entry.getKey());
                 }
-            });
+                writes.countDown();
+            } else {
+                threadPool.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        ListenableFuture<List<ResultSet>> insertsFuture = writeData(entry.getKey(), bucket,
+                            entry.getValue(), ttl.toStandardSeconds());
+                        Futures.addCallback(insertsFuture, new FutureCallback<List<ResultSet>>() {
+                            @Override
+                            public void onSuccess(List<ResultSet> results) {
+                                try {
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("Finished " + bucket + " data migration for schedule id " +
+                                            entry.getKey());
+                                    }
+                                    rateMonitor.requestSucceeded();
+                                    remainingMetrics.decrementAndGet();
+                                    migrationsMeter.mark();
+                                } finally {
+                                    writes.countDown();
+                                }
+                            }
+
+                            @Override
+                            public void onFailure(Throwable t) {
+                                try {
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("Failed to write " + bucket + " data for schedule id " + entry.getKey(),
+                                            t);
+                                    } else {
+                                        log.info("Failed to write " + bucket + " data for schedule id " + entry.getKey() +
+                                            ": " + ThrowableUtil.getRootMessage(t));
+                                    }
+                                    rateMonitor.requestFailed();
+                                    writeErrors.incrementAndGet();
+                                    failedWrites.put(entry.getKey(), entry.getValue());
+                                } finally {
+                                    writes.countDown();
+                                }
+                            }
+                        });
+                    }
+                });
+            }
         }
         writes.await();
         return failedWrites;
     }
 
-    private ListenableFuture<List<ResultSet>> writeData(Integer scheduleId, Bucket bucket, ResultSet resultSet,
+    private ListenableFuture<List<ResultSet>> writeData(Integer scheduleId, Bucket bucket, List<Row> rows,
         Seconds ttl) {
         try {
-            List<Row> rows = resultSet.all();
             List<ResultSetFuture> insertFutures = new ArrayList<ResultSetFuture>();
             Date time = rows.get(0).getDate(0);
             Date nextTime;
