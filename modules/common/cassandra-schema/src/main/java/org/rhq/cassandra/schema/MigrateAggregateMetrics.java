@@ -30,7 +30,6 @@ import com.datastax.driver.core.querybuilder.Batch;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.google.common.base.Stopwatch;
 import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.FutureFallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
@@ -124,8 +123,6 @@ public class MigrateAggregateMetrics implements Step {
 
     private Meter migrationsMeter;
 
-    private CountDownLatch migrations;
-
     private RateMonitor rateMonitor;
 
     private KeyScanner keyScanner;
@@ -135,22 +132,6 @@ public class MigrateAggregateMetrics implements Step {
     private AtomicInteger readErrors = new AtomicInteger();
 
     private AtomicInteger writeErrors = new AtomicInteger();
-
-    private FutureFallback<ResultSet> countReadErrors = new FutureFallback<ResultSet>() {
-        @Override
-        public ListenableFuture<ResultSet> create(Throwable t) throws Exception {
-            readErrors.incrementAndGet();
-            return Futures.immediateFailedFuture(t);
-        }
-    };
-
-    private FutureFallback<List<ResultSet>> countWriteErrors = new FutureFallback<List<ResultSet>>() {
-        @Override
-        public ListenableFuture<List<ResultSet>> create(Throwable t) throws Exception {
-            writeErrors.incrementAndGet();
-            return Futures.immediateFailedFuture(t);
-        }
-    };
 
     @Override
     public void setSession(Session session) {
@@ -210,17 +191,12 @@ public class MigrateAggregateMetrics implements Step {
             remaining6HourMetrics.set(scheduleIdsWith6HourData.size());
             remaining24HourMetrics.set(scheduleIdsWith24HourData.size());
 
-            migrations = new CountDownLatch(scheduleIdsWith1HourData.size() + scheduleIdsWith6HourData.size() +
-                scheduleIdsWith24HourData.size());
-
             threadPool.submit(progressLogger);
             threadPool.submit(rateMonitor);
 
             migrate1HourData(scheduleIdsWith1HourData);
             migrate6HourData(scheduleIdsWith6HourData);
             migrate24HourData(scheduleIdsWith24HourData);
-
-//            migrations.await();
 
             if (remaining1HourMetrics.get() > 0 || remaining6HourMetrics.get() > 0 ||
                 remaining24HourMetrics.get() > 0) {
@@ -231,17 +207,13 @@ public class MigrateAggregateMetrics implements Step {
 
             dropTables();
         } catch (IOException e) {
-            throw new RuntimeException("There was an unexpected I/O error. The are still " +
-                migrations.getCount() + " outstanding migration tasks. The upgrade must be run again to " +
-                "complete the migration.", e);
+            throw new RuntimeException("There was an unexpected I/O error. There are unfinished metrics migrations " +
+                "- " + getRemainingMetrics() + ". The upgrade will have to be run again.");
         } catch (AbortedException e) {
-            throw new RuntimeException("The migration was aborted. There are are still " +
-                migrations.getCount() +" outstanding migration tasks. The upgrade must be run again to " +
-                "complete the migration.", e);
+            throw new RuntimeException("The key scan was aborted. The upgrade will have to be rerun.", e);
         } catch (InterruptedException e) {
-            throw new RuntimeException("The migration was interrupted. There are are still " +
-                migrations.getCount() +" outstanding migration tasks. The upgrade must be run again to " +
-                "complete the migration.", e);
+            throw new RuntimeException("The migration was interrupted. There are still " + getRemainingMetrics() +
+                " unfinished metrics migrations. The upgrade will have to be run again.");
         } finally {
             stopwatch.stop();
             log.info("Finished migrating " + migrated1HourMetrics + " " + Bucket.ONE_HOUR + ", " +
@@ -249,6 +221,11 @@ public class MigrateAggregateMetrics implements Step {
                 Bucket.TWENTY_FOUR_HOUR + " metrics in " + stopwatch.elapsed(TimeUnit.SECONDS) + " sec");
             shutdown();
         }
+    }
+
+    private String getRemainingMetrics() {
+        return "{" + Bucket.ONE_HOUR + ": " + remaining1HourMetrics + ", " + Bucket.SIX_HOUR + ": " +
+            remaining6HourMetrics + ", " + Bucket.TWENTY_FOUR_HOUR + ": " + remaining24HourMetrics + "}";
     }
 
     private double getWriteLimit(int numNodes) {
@@ -291,8 +268,6 @@ public class MigrateAggregateMetrics implements Step {
         PreparedStatement query = session.prepare(
             "SELECT time, type, value FROM rhq.one_hour_metrics " +
             "WHERE schedule_id = ? AND time >= " + startTime.getMillis() + " AND time <= " + endTime.getMillis());
-//        migrateData(scheduleIds, query, delete, Bucket.ONE_HOUR, remaining1HourMetrics, migrated1HourMetrics,
-//            Days.days(14));
         migrate(scheduleIds, query, Bucket.ONE_HOUR, remaining1HourMetrics, Days.days(14));
     }
 
@@ -302,8 +277,6 @@ public class MigrateAggregateMetrics implements Step {
         PreparedStatement query = session.prepare(
             "SELECT time, type, value FROM rhq.six_hour_metrics " +
             "WHERE schedule_id = ? AND time >= " + startTime.getMillis() + " AND time <= " + endTime.getMillis());
-//        migrateData(scheduleIds, query, delete, Bucket.SIX_HOUR, remaining6HourMetrics, migrated6HourMetrics,
-//            Days.days(31));
         migrate(scheduleIds, query, Bucket.SIX_HOUR, remaining6HourMetrics, Days.days(31));
     }
 
@@ -313,8 +286,6 @@ public class MigrateAggregateMetrics implements Step {
         PreparedStatement query = session.prepare(
             "SELECT time, type, value FROM rhq.twenty_four_hour_metrics " +
             "WHERE schedule_id = ? AND time >= " + startTime.getMillis() + " AND time <= " + endTime.getMillis());
-//        migrateData(scheduleIds, query, delete, Bucket.TWENTY_FOUR_HOUR, remaining24HourMetrics, migrated24HourMetrics,
-//            Days.days(365));
         migrate(scheduleIds, query, Bucket.TWENTY_FOUR_HOUR, remaining24HourMetrics, Days.days(365));
     }
 
@@ -541,98 +512,6 @@ public class MigrateAggregateMetrics implements Step {
         return new SimpleStatement("INSERT INTO rhq.aggregate_metrics(schedule_id, bucket, time, avg, max, min) " +
             "VALUES (" + scheduleId + ", '" + bucket + "', " + time.getTime() + ", " + avg + ", " + max + ", " + min +
             ") USING TTL " + newTTL);
-    }
-
-    private void migrateData(Set<Integer> scheduleIds, PreparedStatement query, final PreparedStatement delete, 
-        Bucket bucket, final AtomicInteger remainingMetrics, final AtomicInteger migratedMetrics, Days ttl)
-        throws IOException {
-
-        Stopwatch stopwatch = Stopwatch.createStarted();
-        log.info("Scheduling data migration tasks for " + bucket + " data");
-        final MigrationLog migrationLog = new MigrationLog(new File(dataDir, bucket + "_migration.log"));
-        final Set<Integer> migratedScheduleIds = migrationLog.read();
-        for (final Integer scheduleId : scheduleIds) {
-            if (migratedScheduleIds.contains(scheduleId)) {
-                migrations.countDown();
-                remainingMetrics.decrementAndGet();
-            } else {
-                migrateData(query, delete, bucket, remainingMetrics, migratedMetrics, migrationLog, scheduleId, ttl);
-            }
-        }
-
-        stopwatch.stop();
-        log.info("Finished scheduling migration tasks for " + bucket + " data in " +
-            stopwatch.elapsed(TimeUnit.SECONDS) + " sec");
-    }
-
-    private void migrateData(PreparedStatement query, final PreparedStatement delete, final Bucket bucket,
-        AtomicInteger remainingMetrics, AtomicInteger migratedMetrics, MigrationLog migrationLog,
-        final Integer scheduleId, Days ttl) {
-        readPermitsRef.get().acquire();
-        try {
-            ListenableFuture<ResultSet> queryFuture = session.executeAsync(query.bind(scheduleId));
-            queryFuture = Futures.withFallback(queryFuture, countReadErrors);
-            ListenableFuture<List<ResultSet>> migrationFuture = Futures.transform(queryFuture,
-                new MigrateData(scheduleId, bucket, writePermitsRef.get(), session, ttl.toStandardSeconds()), threadPool);
-            migrationFuture = Futures.withFallback(migrationFuture, countWriteErrors);
-
-//            ListenableFuture<ResultSet> deleteFuture = Futures.transform(migrationFuture,
-//                new AsyncFunction<List<ResultSet>, ResultSet>() {
-//                    @Override
-//                    public ListenableFuture<ResultSet> apply(List<ResultSet> resultSets) throws Exception {
-//                        writePermitsRef.get().acquire();
-//                        return session.executeAsync(delete.bind(scheduleId));
-//                    }
-//                }, threadPool);
-//            Futures.addCallback(deleteFuture, migrationFinished(query, delete, scheduleId, bucket, migrationLog,
-//                remainingMetrics, migratedMetrics, ttl), threadPool);
-            Futures.addCallback(migrationFuture, migrationFinished(query, delete, scheduleId, bucket, migrationLog,
-                remainingMetrics, migratedMetrics, ttl), threadPool);
-        } catch (Exception e) {
-            log.warn("FAILED to submit " + bucket + " data migration tasks for schedule id " + scheduleId, e);
-        }
-    }
-
-    private FutureCallback<List<ResultSet>> migrationFinished(final PreparedStatement query, final PreparedStatement delete,
-        final Integer scheduleId, final Bucket bucket, final MigrationLog migrationLog, final AtomicInteger
-        remainingMetrics, final AtomicInteger migratedMetrics, final Days ttl) {
-
-        return new FutureCallback<List<ResultSet>>() {
-            @Override
-            public void onSuccess(List<ResultSet> resultSets) {
-                try {
-                    migrations.countDown();
-                    remainingMetrics.decrementAndGet();
-                    migratedMetrics.incrementAndGet();
-                    migrationLog.write(scheduleId);
-                    rateMonitor.requestSucceeded();
-                    migrationsMeter.mark();
-                    if (log.isDebugEnabled()) {
-                        log.debug("Finished migrating " + bucket + " data for schedule id " + scheduleId);
-                    }
-                } catch (IOException e) {
-                    log.warn("Failed to log successful migration of " + bucket + " data for schedule id " +
-                        scheduleId, e);
-                }
-            }
-
-            @Override
-            public void onFailure(Throwable t) {
-                if (log.isDebugEnabled()) {
-                    log.debug("Failed to migrate " + bucket + " data for schedule id " + scheduleId +
-                        ". Migration will be rescheduled.", t);
-                } else {
-                    log.info("Failed to migrate " + bucket + " data for schedule id " + scheduleId + ": " +
-                        ThrowableUtil.getRootMessage(t) + ". Migration will be rescheduled");
-                }
-                rateMonitor.requestFailed();
-                try {
-                    migrateData(query, delete, bucket, remainingMetrics, migratedMetrics, migrationLog, scheduleId, ttl);
-                } catch (Exception e) {
-                    log.warn("FAILED to resubmit " + bucket + " data migration task for schedule id " + scheduleId);
-                }
-            }
-        };
     }
 
     private class MigrationProgressLogger implements Runnable {
